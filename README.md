@@ -21,7 +21,7 @@ JSS Resource Tools utilises the JSS API and therefore requires an account with A
 
 ## Installing JSS Resource Tools
 
-For requirements and install instructions, see [INSTALL](https://github.com/beyondthebox/JSS-Resource-Tools/INSTALL.md).
+For requirements and install instructions, see [INSTALL](https://github.com/beyondthebox/JSS-Resource-Tools/blob/master/INSTALL.md).
 
 ## Exporting Resources
 
@@ -101,11 +101,11 @@ For example, if you have a mobile device extention attribute called "Case Type" 
 You can get a listing of valid extention attributes and their IDs for a particular resource by printing an Example Resource Record. See "Example Resource Record".
 
 
-###Common Fields
+### Common Fields
 
 Following is a list of common fields or interesting examples that are available through field naming:
 
-####Users
+#### Users
 
 | Fieldname | Description |
 |-----------|-------------|
@@ -113,7 +113,7 @@ Following is a list of common fields or interesting examples that are available 
 | `links/mobile_devices/*[0]/id` | ID of the first mobile device assigned to the user. |
 | `links/computers/*[0]/id` | ID of the first mobile device assigned to the user. |
 
-####Mobile Devices
+#### Mobile Devices
 
 | Fieldname | Description |
 |-----------|-------------|
@@ -129,7 +129,7 @@ Following is a list of common fields or interesting examples that are available 
 | `purchasing/purchase_price` | Purchase Price |
 | `applications/size` | The number of applications installed on the device. |
 
-##Command Examples
+## Command Examples
 
 Following is a list of command examples. For cleanliness, they omit the `--jss`, `--username` and `--password` options that you may generally provide in the command. In these examples, you will be prompted for them once running the command.
 
@@ -186,7 +186,7 @@ User beware.
 
 ## License & Support
 
-JSS Resource Tools is licensed under The MIT License, available here - [LICENSE.md](https://github.com/beyondthebox/JSS-Resource-Tools/LICENSE.md). As per the license, this software is provided "as-is" and is not actively supported or warranted by Beyond the Box.
+JSS Resource Tools is licensed under The MIT License, available here - [LICENSE.md](https://github.com/beyondthebox/JSS-Resource-Tools/blob/master/LICENSE.md). As per the license, this software is provided "as-is" and is not actively supported or warranted by Beyond the Box.
 
 ## About Beyond the Box
 
