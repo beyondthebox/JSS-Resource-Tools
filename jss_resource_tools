@@ -1,0 +1,423 @@
+#! /usr/bin/env python
+#
+#	JSS Resource Tools (v1.15)
+#	by Beyond the Box Labs (https://beyondthebox.github.io)
+#	
+#	Version History:
+#	1.15 	(05/12/17) - Initial public release.
+#
+#	--------------------
+#
+#	MIT License
+#
+#	Copyright (c) 2017 Beyond the Box
+#
+#	Permission is hereby granted, free of charge, to any person obtaining a copy
+#	of this software and associated documentation files (the "Software"), to deal
+#	in the Software without restriction, including without limitation the rights
+#	to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+#	copies of the Software, and to permit persons to whom the Software is
+#	furnished to do so, subject to the following conditions:
+#
+#	The above copyright notice and this permission notice shall be included in all
+#	copies or substantial portions of the Software.
+#
+#	THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#	IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#	FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#	AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#	LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+#	OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+#	SOFTWARE.
+
+import click
+import csv
+import requests
+import xml.etree.ElementTree as ET
+import xml.dom.minidom as minidom
+import os.path
+from random import randint
+
+version = 1.15
+
+class Settings(object):
+    def __init__(self, base_url=None, username=None, password=None, verbose=None, danger=None, dry=None, match=None):
+        self.base_url = base_url.strip("/")
+        self.username = username
+        self.password = password
+        self.verbose = verbose
+        self.danger = danger
+        self.dry = dry
+        self.match = match
+
+@click.command()
+@click.option('--jss', '-j', required=True, help='The base URL to your JSS server.', prompt="JSS Base URL")
+@click.option('--username', '-u', help='The password for your JSS account.', required=True, prompt="JSS Username" )
+@click.option('--password', '-p', help='The password for your JSS account.', required=True, prompt="JSS Password", hide_input=True )
+@click.option('--mode', '-m', type=click.Choice(['import', 'update', 'export', 'example']), required=True, prompt="Mode (choose from import, update, export or example)", help='Which mode to run in.')
+@click.option('--type', '-t', type=click.Choice(['mobiledevices', 'computers', 'users']), required=True, help='The type of JSS resource to process.', prompt="Resource Type (choose from mobiledevices, computers or users)")
+@click.option('--field', '-f', multiple=True, help='In export mode, specifies custom fields from the resource to include in the CSV.')
+@click.option('--match', '-m', 'match', default=False, help="In update mode, matches and keys resources to this field name.")
+@click.option('--dry', '-d', 'dry', is_flag=True, default=False, help="Performs a dry run and does not actually update or import data.")
+@click.option('--verbose', '-v', 'verbose', is_flag=True, default=False, help="Runs in verbose mode - logging more information.")
+@click.option('--danger', 'danger', is_flag=True, default=False, help="Bypasses safety checks - see README.")
+@click.argument('filepath', type=click.Path(), required=False)
+
+@click.pass_context
+def main(ctx, jss, username, password, mode, type, match, dry, verbose, field, danger, filepath):
+	"""JSS Resource Tools by Beyond the Box Labs (https://beyondthebox.github.io)\n
+	\b
+	A command line utility that utilises the Jamf Pro JSS API in order to import, export and update JSS resources en-masse.\n
+	\b
+	For detailed help, see the project README (https://github.com/beyondthebox/JSS-Resource-Tools/blob/master/README.md)
+	"""
+	global resource_ep
+	global resource_el
+	global resource_hr
+	ctx.obj = Settings(jss, username, password, verbose, danger, dry, match)
+	click.secho('JSS Resource Tools v{0} by Beyond the Box Labs'.format(version), fg='blue', bold=True)
+	if dry:
+		click.secho('Performing a dry run (--dry). No data will be updated or imported.', bold=True)
+	if type == 'mobiledevices':
+		resource_ep, resource_el, resource_hr = 'mobiledevices', 'mobile_device', 'mobile device'
+	elif type == 'computers':
+		resource_ep, resource_el, resource_hr = 'computers', 'computer', 'computer'
+	elif type == 'users': 
+		resource_ep, resource_el, resource_hr = 'users', 'user', 'user'
+
+	if auth_check():
+		if mode == 'example':
+			click.secho('Will fetch and print an example record of a {0} from your JSS:'.format(resource_hr), fg='blue', bold=True)
+			print_example_record()
+			exit()
+		elif mode == 'export':
+			if filepath:
+				file = open(filepath,"w")
+				if file:
+					click.secho('Will fetch and export {0}s from your JSS in CSV format:'.format(resource_hr), fg='blue', bold=True)
+					export_to_csv(type, field, file)
+					file.close()
+					exit()
+				else:
+					echo_log('ERROR: Could not open file path "{0}" for writing.'.format(filepath), 4)
+					exit(1)	
+			else:
+				echo_log('ERROR: You must supply an export file path as [FILEPATH].', 4)
+				exit(1)
+		elif mode == 'import':
+			if filepath:
+				file = open(filepath,"r")
+				if file:
+					click.secho('Will import new {0}s into your JSS from CSV:'.format(resource_hr), fg='blue', bold=True)
+					import_from_csv(file)
+					if dry:
+						click.secho('Finished a dry run of {0} imports. Processed {1} records.'.format(resource_hr, ctx.obj.reader.line_num-1), fg='blue', bold=True)
+					else:
+						click.secho('Finished processing {0} imports. Processed {1} records and imported {2} {3}(s).'.format(resource_hr, ctx.obj.reader.line_num-1, ctx.obj.records_mutated, resource_hr), fg='blue', bold=True)
+					exit()
+				else:
+					echo_log('ERROR: Could not open file path "{0}" for reading.'.format(filepath), 4)
+					exit(1)
+			else:
+				echo_log('ERROR: You must supply an import file path as [FILEPATH].', 4)
+				exit(1)
+		elif mode == 'update':
+			if match and type == "users":
+				echo_log('ERROR: --match is not currently supported for users. You must supply a user "id" field in your CSV.', 4)
+				exit(1)
+			if filepath:
+				file = open(filepath,"r")
+				if file:
+					click.secho('Updating {0}s from CSV:'.format(resource_hr), fg='blue', bold=True)
+					update_from_csv(file)
+					if dry:
+						click.secho('Finished a dry run of {0} updates. Processed {1} records and would have updated {2} field(s) across {3} {4}(s).'.format(resource_hr, ctx.obj.reader.line_num-1, ctx.obj.fields_mutated, ctx.obj.records_mutated, resource_hr), fg='blue', bold=True)
+					else:
+						click.secho('Finished processing {0} updates. Processed {1} records and updated {2} {3}(s).'.format(resource_hr, ctx.obj.reader.line_num, ctx.obj.records_mutated, resource_hr), fg='blue', bold=True)
+					exit()
+				else:
+					echo_log('ERROR: Could not open file path "{0}" for reading.'.format(filepath), 4)
+					exit(1)
+			else:
+				echo_log('ERROR: You must supply an import file path as [FILEPATH].', 4)
+				exit(1)
+
+def print_example_record():
+	resources = get_all_jss_resources()
+	if len(resources.findall("./"+resource_el)) > 0:
+		# got at least one resource - fetch the first record
+		resource = get_jss_resource(resources.find('./{0}/[{1}]/id'.format(resource_el, randint(0, len(resources.findall("./"+resource_el))-1))).text)
+		click.echo(minidom.parseString(ET.tostring(resource)).toprettyxml())
+	else:
+		echo_log('Your JSS does not have any {0}s defined.'.format(resource_hr), 3)
+
+@click.pass_obj
+def auth_check(ctx):
+	echo_log('Checking authentication by requesting {0}/JSSResource/accounts/username/{1}.'.format(ctx.base_url, ctx.username), 1)
+	account_response = requests.get('{0}/JSSResource/accounts/username/{1}'.format(ctx.base_url, ctx.username), auth=(ctx.username, ctx.password), verify=True)
+	if account_response.status_code == 200:
+		echo_log('Successfully authenticated to the JSS at {0}.'.format(ctx.base_url))
+		return True
+	elif account_response.status_code == 401:
+		echo_log('ERROR: Could not authenticate to the JSS at {0}. Your username and/or password were rejected by the server.'.format(ctx.base_url), 4)
+		exit(1)
+	else:
+		echo_log('ERROR: Could not authenticate to the JSS at {0}. Encountered a {1} error when connecting. Ensure the URL is correct, and try again.'.format(ctx.base_url, account_response.status_code),4)
+		exit(1)
+
+@click.pass_obj
+def echo_log(ctx, line, level=2):
+	# level 1 is debug - will only show in verbose
+	# level 2 is info
+	# level 3 is warning
+	# level 4 is error
+	if level == 1 and ctx.verbose == True:
+		click.echo(line)
+	elif level == 2:
+		click.echo(line)
+	elif level == 3:
+		click.secho(line, fg='yellow')
+	elif level == 4:
+		click.secho(line, fg='red', bold=True, err=True)
+
+@click.pass_obj
+def update_element(ctx, tree, field, value):
+	# check we arent being asked to update a dangerous element
+	if field.find("udid") != -1 and ctx.danger == False:
+		echo_log('[{0}] WARNING: Refusing to update {1} UDID in field {2}, as it may break enrollment. See the --danger option for override if you know what you are doing.'.format(ctx.reader.line_num, resource_hr, field), 3)
+		return ''
+	# check for a formatted parent tag, then match elements in the tree with xpath
+	field_matches = tree.findall(find_path_for_field(field))
+	if len(field_matches) == 1:
+		# check to see that the element is not a list (ie. has subelements)
+		if len(list(field_matches[0])) == 0:
+			match_text = "" if field_matches[0].text == None else field_matches[0].text
+  			if match_text != value:
+  				echo_log('[{0}] "{1}" changed from "{2}" to "{3}"'.format(ctx.reader.line_num, field, str(match_text), value), 2)
+  				field_matches[0].text = value
+  				return True
+  			else:
+  				echo_log('[{0}] "{1}" is already "{2}".'.format(ctx.reader.line_num, field, value), 1)
+  				return False
+  		else:
+  			echo_log('WARNING: The element matching "'+field+'" for '+resource_element+' "'+each['match']+'" has subelements, and is not updateable directly. Will skip this field.', 3)
+  			return False
+  	elif len(field_matches) > 1:
+  		echo_log('WARNING: Found multiple elements ({0}) matching "{1}" for {2}. Will skip this field.'.format(len(field_matches), field, resource_hr), 3)
+  		return False
+  	else:
+  		echo_log('[{0}] WARNING: Could not find an element matching "{1}" for {2}. Will skip this field.'.format(ctx.reader.line_num, field, resource_hr, tree.find('./id')), 3)
+  		return False
+
+def find_path_for_field(field):
+	# check for a formatted parent tag
+	if len(field.split('/')) == 2:
+	  	# parent element defined
+	  	if field.split('/')[0] == 'extension_attribute':
+	  		# field is an extension attribute. we deal with these a little differently
+	  		return './extension_attributes/extension_attribute/[id="{0}"]/value'.format(field.split('/')[1])
+	  	if field.split('/')[0] == 'field':
+	  		# field is a "field". we see these on peripherals and deal with them differently again - thanks jamf!
+	  		return './general/fields/field/[name={0}]/value'.format(field.split('/')[1])
+	  	else:
+	  		return './{0}/{1}'.format(field.split('/')[0], field.split('/')[1])
+	else:
+		return './{0}'.format(field)
+
+@click.pass_obj
+def update_from_csv(ctx, file):
+	required_key = ctx.match if ctx.match else "id"
+	ctx.reader = csv.DictReader(file)
+	ctx.records_mutated = 0
+	ctx.fields_mutated = 0
+	if ctx.reader.fieldnames:
+		echo_log('Found fields in CSV: {0}'.format(ctx.reader.fieldnames), 1)
+		if required_key in ctx.reader.fieldnames:
+			echo_log('Using "{0}" as primary key.'.format(required_key), 1)
+			for each in ctx.reader:
+				matched_object = None
+				record_updated = False
+				if each[required_key] == "":
+					echo_log('[{0}] WARNING: The match field ("{1}") in this row is empty. Will skip this row and will not update.'.format(ctx.reader.line_num, required_key), 3)
+					continue
+				if ctx.match:
+					# ask API to match current row to a resource
+					matches_response = requests.get('{0}/JSSResource/{1}/match/{2}'.format(ctx.base_url, resource_ep, each[required_key]), auth=(ctx.username, ctx.password), verify=True)
+					if matches_response.status_code == 200:
+						matches_tree = ET.ElementTree(ET.fromstring(matches_response.content))
+				  		matches = matches_tree.findall('./{0}'.format(resource_el))
+				  		if len(matches) == 1:
+				  			# got a single match - load the whole resource object in xml
+				  			match_response = requests.get('{0}/JSSResource/{1}/id/{2}'.format(ctx.base_url, resource_ep, matches_tree.find('./{0}/id'.format(resource_el)).text), auth=(ctx.username, ctx.password), verify=True)
+				  			if match_response.status_code == 200:
+			  					echo_log('[{0}] "{1}" matched to {2} ID #{3}'.format(ctx.reader.line_num, each[required_key], resource_hr, matches_tree.find('./{0}/id'.format(resource_el)).text), 1)
+								matched_object = ET.fromstring(match_response.content)
+						elif len(matches) > 1:
+			  				echo_log('[{0}] WARNING: Matched more than one record ({1}) for "{2}". Will skip this row and will not update.'.format(ctx.reader.line_num, len(matches), each[required_key]), 3)
+			  				continue
+			  			else:
+			  				echo_log('[{0}] WARNING: Could not match "{1}" to a {2}.'.format(ctx.reader.line_num, each[required_key], resource_hr), 3)
+			  		else: # matches_response.status_code != 200
+				  		echo_log('[{0}] ERROR: Could not load XML for "{1}". Encountered HTTP error {2}. Will skip this row and will not update.'.format(ctx.reader.line_num, each[required_key], matches_response.status_code), 3)	
+				else:
+					resource_tree = get_jss_resource(each["id"])
+					if resource_tree is not None:
+						echo_log('[{0}] Successfully keyed ID #{1} to {2}.'.format(ctx.reader.line_num, each['id'], resource_hr), 1)
+						matched_object = resource_tree
+			  	if matched_object is not None:
+			  		record_updated = False
+			  		for field in ctx.reader.fieldnames:
+			  			if field != required_key and update_element(matched_object, field, each[field]):
+			  				record_updated = True
+			  				ctx.fields_mutated += 1
+			  		if record_updated == True:
+			  			ctx.records_mutated += 1
+			  			if ctx.dry == False:
+			  				resource_id = get_resource_id(matched_object)
+			  				if resource_id:
+			  					put_jss_resource(resource_id, ET.tostring(matched_object))
+			  				else:
+			  					echo_log('[{0}] WARNING: Could not find resource id for {1}.'.format(ctx.reader.line_num, resource_hr), 3)
+
+
+		else:
+			echo_log('ERROR: Required key "{0}" could not be found in CSV.'.format(required_key), 4)
+			exit(1)
+	else:
+		echo_log('ERROR: Could not load fieldnames from CSV file. Please check your update file.', 4)
+
+@click.pass_obj
+def import_from_csv(ctx, file):
+	ctx.reader = csv.DictReader(file)
+	ctx.records_mutated = 0
+	if ctx.reader.fieldnames:
+		echo_log('Importing {1}s with fields: {2}'.format(ctx.reader.line_num, resource_hr, ctx.reader.fieldnames), 2)	
+		for each in ctx.reader:
+			resource_tag = ET.Element(resource_el)
+			for field in ctx.reader.fieldnames:
+				field_tag = ET.SubElement(resource_tag, field)
+				field_tag.text = each[field]
+			if ctx.dry == False:
+				if post_jss_resource(ctx.reader.fieldnames[0], each[ctx.reader.fieldnames[0]], ET.tostring(resource_tag)):
+					ctx.records_mutated += 1
+			else:
+				if ctx.verbose:
+					echo_log('[{0}] Would have imported {1}: {2}'.format(ctx.reader.line_num, resource_hr, each), 1)
+				else:
+  					echo_log('[{0}] Would have imported a {1} with {2} "{3}".'.format(ctx.reader.line_num, resource_hr, ctx.reader.fieldnames[0], each[ctx.reader.fieldnames[0]]), 2)
+
+	else:
+		echo_log('ERROR: Could not load fieldnames from CSV file. Please check your import file.', 4)
+
+
+def export_to_csv(type, fields, file):
+	with file as csvfile:
+		writer = csv.writer(csvfile, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+		detailed_export_fields = []
+		if type == 'users':
+			detailed_export_fields.extend([ 'full_name', 'email', 'phone_number', 'position' ] )
+		elif type == 'computers':
+			detailed_export_fields.extend([ 'general/asset_tag', 'hardware/model', 'general/serial_number', 'general/mac_address', 'general/alt_mac_address', 'hardware/total_ram'])
+		elif type == 'mobiledevices':
+			detailed_export_fields.extend([ 'general/asset_tag', 'general/os_version', 'network/imei'])
+		echo_log('Loaded built in export fields for {0}s: {1}.'.format(resource_hr, detailed_export_fields), 1)
+		if (len(fields) > 0):
+			# add custom fields from arguments
+			detailed_export_fields.extend(fields)
+			echo_log('Added custom export fields: {0}.'.format(fields), 1)
+		all_resources = get_all_jss_resources()
+		all_resources_list = all_resources.findall("./"+resource_el)
+		if len(all_resources_list) > 0:
+			# build a header
+			header = []		
+			for element in all_resources_list[0].iter():
+				header.append(element.tag)
+			# FIX - this is where we would add our custom headers
+			if len(detailed_export_fields) > 0:
+				header.extend(detailed_export_fields)	
+			# pop the enclosing resource tag
+			header.pop(0)
+			writer.writerow(header)
+			# build each row
+			for simple_resource in all_resources_list:
+				row = []
+				for element in simple_resource.iter():
+					row.append(element.text)
+				# check to see if we have custom fields and need to load the actual resource
+				if len(detailed_export_fields) > 0:
+					# we have custom fields to map to the resource
+					detailed_resource = get_jss_resource(simple_resource.find('./id').text)
+					for detailed_export_field in detailed_export_fields:
+						matched_element = detailed_resource.find(find_path_for_field(detailed_export_field))
+						if hasattr(matched_element, 'text'):
+							row.append(matched_element.text)
+						else:
+							echo_log('WARNING: Could not find an element matching "{0}" for {1} ID#{2}.'.format(detailed_export_field, resource_hr, simple_resource.find('./id').text), 3)
+							row.append('"Not Found"')
+				# pop the enclosing resource tag
+				row.pop(0)
+				writer.writerow(row)
+				echo_log('Wrote {0} with "{1}" "{2}" to CSV.'.format(resource_hr, header[0], row[0], resource_hr), 1)
+			echo_log('Exported {0} {1}s.'.format(len(all_resources), resource_hr), 2)
+			exit()
+		else:
+			echo_log('Your JSS does not have any {0}s defined.'.format(resource_hr), 3)
+
+def get_resource_id(resource):
+	if resource.tag == "mobile_device":
+		id_element = resource.find("general").find("id")
+	elif resource.tag == "user":
+		id_element = resource.find("id")
+	if id_element is not None:
+		return id_element.text
+
+@click.pass_obj
+def get_all_jss_resources(ctx):
+	# echo_log('Fetching master list of {0}s from the JSS ({1}/JSSResource/{2}).'.format(resource_hr, ctx.base_url, resource_ep), 1) # debug line
+	all_resources_response = requests.get('{0}/JSSResource/{1}'.format(ctx.base_url, resource_ep), auth=(ctx.username, ctx.password), verify=True)
+	if all_resources_response.status_code == 200:
+		all_resources_tree = ET.fromstring(all_resources_response.content)
+		echo_log('Successfully fetched {0} {1}s.'.format(len(all_resources_tree), resource_hr), 1)
+		return all_resources_tree
+	else:
+		echo_log('ERROR: could not fetch a list of {0}s. Encountered HTTP status {1}.'.format(resource_hr, all_resources_response.status_code), 4)
+		return
+
+@click.pass_obj
+def get_jss_resource(ctx, resource_id):
+	# echo_log('Will GET detailed {0} record from the JSS ({1}/JSSResource/{2}/id/{3}).'.format(resource_hr, ctx.base_url, resource_ep, resource_id), 1) # debug line
+	resource_response = requests.get('{0}/JSSResource/{1}/id/{2}'.format(ctx.base_url, resource_ep, resource_id), auth=(ctx.username, ctx.password), verify=True)
+	if resource_response.status_code == 200:
+		resource_tree = ET.fromstring(resource_response.content)
+		return resource_tree
+	else:
+		echo_log('[{0}] ERROR: could not fetch a {1} with ID # {2}. Encountered HTTP status {3}.'.format(current_line, resource_hr, resource_id, resource_response.status_code), 4)
+		return
+
+@click.pass_obj
+def put_jss_resource(ctx, resource_id, xml_string):
+	# echo_log('Will PUT updated {0} record to the JSS ({1}/JSSResource/{2}/id/{3}).'.format(resource_hr, ctx.base_url, resource_ep, resource_id), 1) # debug line
+	put_resource_response = requests.put('{0}/JSSResource/{1}/id/{2}'.format(ctx.base_url, resource_ep, resource_id), auth=(ctx.username, ctx.password), data=xml_string, verify=True)
+	if put_resource_response.status_code == 201:
+		echo_log('[{0}] Successfully updated {1} ID #{2}.'.format(ctx.reader.line_num, resource_hr, resource_id), 2)
+		return True
+	else:
+		echo_log('[{0}] ERROR: could not update a {1} with ID # {2}. Encountered HTTP status {3}.'.format(ctx.reader.line_num, resource_hr, resource_id, put_resource_response.status_code), 4)
+		return False
+
+@click.pass_obj
+def post_jss_resource(ctx, resource_field_name, resource_field_value, xml_string):
+	# echo_log('Will POST {0} record to the JSS ({1}/JSSResource/{2}/id/{3}).'.format(resource_hr, ctx.base_url, resource_ep, resource_id), 1) # debug line
+	post_resource_response = requests.post('{0}/JSSResource/{1}'.format(ctx.base_url, resource_ep), auth=(ctx.username, ctx.password), data=xml_string, verify=True)
+	if post_resource_response.status_code == 201:
+		echo_log('[{0}] Successfully imported {1} with {2} "{3}".'.format(ctx.reader.line_num, resource_hr, resource_field_name, resource_field_value), 2)
+		return True
+	elif post_resource_response.status_code == 409:
+  		echo_log('[{0}] WARNING: Could not import a {1} with {2} "{3}". Error 409 indicates that this resource is a duplicate.'.format(ctx.reader.line_num, resource_hr, resource_field_name, resource_field_value), 3)
+		return False
+	else:
+		echo_log('[{0}] ERROR: Could not import a {1} with {2} "{3}". Encountered HTTP status {4}.'.format(ctx.reader.line_num, resource_hr, resource_field_name, resource_field_value, post_resource_response.status_code), 4)
+		return False
+
+if __name__ == '__main__':
+    main()
